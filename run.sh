@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Use local node_modules binaries if available
+export PATH="$(cd "$(dirname "$0")" && pwd)/node_modules/.bin:$PATH"
+
 SEP="════════════════════════════════════════════════════════════════"
 
 echo "$SEP"
