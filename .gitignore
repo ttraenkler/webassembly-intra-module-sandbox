@@ -1,4 +1,4 @@
-node_modules/
+wasm-merge/target/
 *.wasm
 merged.wat
 optimized.wat

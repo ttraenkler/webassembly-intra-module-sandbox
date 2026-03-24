@@ -23,6 +23,9 @@
   (core module $B
     (import "a" "string_byte" (func $string_byte (param i32) (result i32)))
 
+    ;; B's own memory — completely separate from A's
+    (memory (export "b_memory") 1)
+
     (func (export "read_first") (result i32)
       (call $string_byte (i32.const 0))
     )

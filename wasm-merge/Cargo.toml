@@ -1,0 +1,8 @@
+[package]
+name = "wasm-merge"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+wasmparser = "0.227"
+wasm-encoder = { version = "0.227", features = ["wasmparser"] }
