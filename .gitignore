@@ -4,3 +4,7 @@ merged.wat
 optimized.wat
 component-merged.wat
 component-optimized.wat
+insecure_*.wat
+bounded_*.wat
+handle_*.wat
+SECURITY.md

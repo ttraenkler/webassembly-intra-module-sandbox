@@ -1,10 +1,9 @@
 (module
-  ;; Module B: has its own linear memory and imports string_byte from A.
-  ;; It can read A's data only through the accessor — it never
-  ;; receives a pointer into A's memory and has no way to forge one.
+  ;; Module B (bounded): imports the bounds-checked accessor from A.
+  ;; Identical call site as the insecure version — the security
+  ;; boundary is enforced entirely within A.
   (import "a" "string_byte" (func $string_byte (param i32) (result i32)))
 
-  ;; B's own memory — completely separate from A's
   (memory (export "b_memory") 1)
 
   ;; read_first() -> i32
@@ -15,7 +14,7 @@
 
   ;; read_oob() -> i32
   ;; Attempts to read index 10 — beyond "hello" (length 5).
-  ;; INSECURE: succeeds, reads whatever is at offset 10 in A's memory.
+  ;; SAFE: A's bounds check will trap (unreachable).
   (func (export "read_oob") (result i32)
     (call $string_byte (i32.const 10))
   )
@@ -28,8 +27,7 @@
   )
 
   ;; read_at(i: i32) -> i32
-  ;; Reads a dynamic index — caller controls which byte to read.
-  ;; Dynamic index: optimizer cannot prove safety, bounds check preserved.
+  ;; Reads a dynamic index — A's bounds check enforced at runtime.
   (func (export "read_at") (param $i i32) (result i32)
     (call $string_byte (local.get $i))
   )

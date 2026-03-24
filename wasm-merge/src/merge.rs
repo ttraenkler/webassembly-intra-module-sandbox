@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use wasm_encoder::{
-    CodeSection, DataSection, ExportKind, ExportSection, FunctionSection, GlobalSection,
-    MemorySection, Module, TableSection, TypeSection,
+    CodeSection, DataSection, ElementSection, ExportKind, ExportSection, FunctionSection,
+    GlobalSection, MemorySection, Module, TableSection, TypeSection,
     reencode::Reencode,
 };
 use wasmparser::{Parser, Payload};
@@ -299,6 +299,7 @@ pub fn merge(component: &Component) -> Result<Vec<u8>, String> {
     let mut export_sec = ExportSection::new();
     let mut code_sec = CodeSection::new();
     let mut data_sec = DataSection::new();
+    let mut elem_sec = ElementSection::new();
 
     for (pos, &mi) in module_order.iter().enumerate() {
         let wasm = &component.modules[mi].wasm;
@@ -343,6 +344,11 @@ pub fn merge(component: &Component) -> Result<Vec<u8>, String> {
                         .parse_data_section(&mut data_sec, reader)
                         .map_err(|e| format!("Data: {e}"))?;
                 }
+                Payload::ElementSection(reader) => {
+                    remap
+                        .parse_element_section(&mut elem_sec, reader)
+                        .map_err(|e| format!("Elem: {e}"))?;
+                }
                 // Skip import sections — all imports are resolved internally
                 Payload::ImportSection(_) => {}
                 _ => {}
@@ -384,6 +390,9 @@ pub fn merge(component: &Component) -> Result<Vec<u8>, String> {
         output.section(&global_sec);
     }
     output.section(&export_sec);
+    if !elem_sec.is_empty() {
+        output.section(&elem_sec);
+    }
     output.section(&code_sec);
     output.section(&data_sec);
 
