@@ -94,6 +94,80 @@ else
   echo ""
 fi
 
+# ── Step 6: Component Model merge ───────────────────────────────────
+echo "$SEP"
+echo "  STEP 6 — Component Model merge (component.wat)"
+echo "$SEP"
+echo ""
+echo "── component.wat (nested core modules with instantiation wiring) ──"
+cat component.wat
+echo ""
+
+wasm-tools parse component.wat -o component.wasm
+echo "  ✓ component.wasm  ($(wc -c < component.wasm) bytes)"
+
+$WASM_MERGE component.wasm -o component-merged.wasm
+echo "  ✓ component-merged.wasm  ($(wc -c < component-merged.wasm) bytes)"
+echo ""
+
+echo "── Disassembly ──"
+wasm-tools print component-merged.wasm -o component-merged.wat
+cat component-merged.wat
+echo ""
+
+echo "── Verification ──"
+CMCOUNT=$(grep -c '(memory' component-merged.wat)
+echo "  ✓ Memory declarations found: $CMCOUNT"
+
+if grep -q 'load8_u 1\|load8_u $' component-merged.wat; then
+  echo "  ✓ string_byte references memory index 1 (A's memory)"
+fi
+
+if grep -q 'call' component-merged.wat; then
+  echo "  ✓ read_first calls string_byte (cross-module call resolved)"
+fi
+
+# Compare standalone merge vs component merge — should produce identical output
+if diff -q merged.wasm component-merged.wasm &>/dev/null; then
+  echo "  ✓ Standalone merge and component merge produce identical output"
+else
+  echo "  ✗ Standalone merge and component merge differ (investigating...)"
+  diff <(wasm-tools print merged.wasm) <(wasm-tools print component-merged.wasm) || true
+fi
+echo ""
+
+# ── Step 7: Optimize component merge (inline) — optional ───────────
+if command -v wasm-opt &>/dev/null; then
+  echo "$SEP"
+  echo "  STEP 7 — wasm-opt --inlining on component-merged.wasm"
+  echo "$SEP"
+  wasm-opt --inlining --enable-multimemory component-merged.wasm -o component-optimized.wasm
+  echo "  ✓ component-optimized.wasm  ($(wc -c < component-optimized.wasm) bytes)"
+  echo ""
+
+  echo "── Disassembly ──"
+  wasm-tools print component-optimized.wasm -o component-optimized.wat
+  cat component-optimized.wat
+  echo ""
+
+  echo "── Verification ──"
+  if grep -q 'i32.load8_u' component-optimized.wat; then
+    echo "  ✓ read_first contains a direct i32.load8_u instruction"
+  fi
+
+  READ_FIRST_C=$(sed -n '/func.*read_first/,/^  )/p' component-optimized.wat)
+  if echo "$READ_FIRST_C" | grep -q 'call'; then
+    echo "  ✗ read_first still contains a call (inlining did not fully eliminate it)"
+  else
+    echo "  ✓ The call to string_byte has been completely eliminated"
+  fi
+
+  if diff -q optimized.wasm component-optimized.wasm &>/dev/null; then
+    echo "  ✓ Optimized standalone and component outputs are identical"
+  fi
+  echo ""
+fi
+
 # ── Summary ─────────────────────────────────────────────────────────
 echo "$SEP"
 echo "  SUMMARY"

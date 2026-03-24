@@ -2,3 +2,5 @@ wasm-merge/target/
 *.wasm
 merged.wat
 optimized.wat
+component-merged.wat
+component-optimized.wat
