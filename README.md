@@ -18,13 +18,19 @@ After merging with multi-memory and optimizing with inlining:
 
 ## Files
 
-| File            | Description                                             |
-| --------------- | ------------------------------------------------------- |
-| `a.wat`         | Module A — owns memory, exports `string_byte` accessor  |
-| `b.wat`         | Module B — imports accessor, has its own memory         |
-| `run.sh`        | Full pipeline: compile → merge → verify                 |
-| `component.wat` | Same example using Component Model nested-module syntax |
-| `wasm-merge/`   | Rust tool: shared-nothing multi-memory module merger    |
+| File               | Description                                              |
+| ------------------ | -------------------------------------------------------- |
+| `a.wat`            | Module A — owns memory, exports raw accessor (insecure)  |
+| `b.wat`            | Module B — imports accessor, has its own memory           |
+| `a_bounded.wat`    | Module A — bounds-checked accessor (inline check)         |
+| `b_bounded.wat`    | Module B — same interface, safety enforced by A            |
+| `a_handle.wat`     | Module A — funcref table + call_indirect (table indirection) |
+| `b_handle.wat`     | Module B — opaque handle-based access                      |
+| `component.wat`    | Same example using Component Model nested-module syntax    |
+| `run.sh`           | Full pipeline: compile → merge → verify                    |
+| `run_security.sh`  | Security comparison: all three approaches, generates `SECURITY.md` |
+| `SECURITY.md`      | Generated output from `run_security.sh`                    |
+| `wasm-merge/`      | Rust tool: shared-nothing multi-memory module merger       |
 
 ## Prerequisites
 
@@ -43,7 +49,11 @@ Optionally install [Binaryen](https://github.com/WebAssembly/binaryen/releases) 
 ## Run
 
 ```bash
+# Basic demo: merge + optimize
 ./run.sh
+
+# Security comparison: insecure vs inline check vs table indirection
+./run_security.sh    # generates SECURITY.md
 ```
 
 ## wasm-merge
@@ -100,9 +110,31 @@ and reads `(core instance ...)` declarations to determine import wiring.
   i32.load8_u 1)        ;; ← direct load from A's memory, no call!
 ```
 
+## Security Comparison
+
+The original raw accessor is **insecure** — B can pass any `i32` and read A's entire memory. [`run_security.sh`](run_security.sh) compares three approaches:
+
+| Approach | How it works | Security |
+|----------|-------------|----------|
+| **Insecure** | `string_byte(i)` — raw load, no check | none |
+| **Inline check** | `string_byte(i)` — bounds check against internal globals | traps on out-of-bounds |
+| **Table indirection** | `get_byte(handle, i)` — funcref table dispatch + bounds check | opaque handle + traps |
+
+Four test functions show how the optimizer handles each case:
+
+| Function | Index | Insecure | Inline check / Table indirection |
+|----------|-------|----------|----------------------------------|
+| `read_first()` | `0` (static) | direct load | check eliminated (0 < 5) |
+| `read_oob()` | `10` (static) | direct load (reads garbage) | reduced to `unreachable` |
+| `read_at_3()` | `3` (static) | direct load | check eliminated (3 < 5) |
+| `read_at(i)` | dynamic | direct load | **bounds check preserved** |
+
+See [`SECURITY.md`](SECURITY.md) for the full generated output with WAT disassembly.
+
 ## Why This Matters
 
 - **Isolation at the interface level**: modules cannot access each other's memory
-- **Zero-cost abstraction**: the optimizer erases the boundary entirely
+- **Zero-cost abstraction**: the optimizer erases the boundary entirely for static indices
+- **Runtime safety**: bounds checks survive for dynamic indices
 - **No spec changes needed**: works today with multi-memory + existing tooling
 - **Component Model alignment**: the same pattern maps directly to nested core modules
