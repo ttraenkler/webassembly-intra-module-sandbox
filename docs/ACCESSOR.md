@@ -1285,6 +1285,440 @@ mutual exclusion. After optimization, read+write inline to direct memory ops.
 accesses. The optimizer correctly preserves the check — it cannot prove the
 flag's value statically.
 
+## Part 3: Primitives and structs — trivial zero-cost patterns
+
+When the cross-module interface passes primitive values (i32, i64, f32, f64)
+or struct fields via individual accessors, values travel on the Wasm stack —
+no memory copy, no bounds check needed.
+
+### 7. PRIMITIVE — counter via global, values on the stack
+
+#### Module A
+```wat
+(module
+  ;; Module A (primitive): owns a counter as a mutable global.
+  ;; Exports get/increment — B receives values on the stack,
+  ;; no memory access needed. Trivially zero-cost after inlining.
+  (memory (export "memory") 1)
+  (global $counter (mut i32) (i32.const 0))
+
+  (func (export "get_counter") (result i32)
+    (global.get $counter))
+
+  (func (export "increment")
+    (global.set $counter (i32.add (global.get $counter) (i32.const 1))))
+)
+```
+
+#### Module B
+```wat
+(module
+  ;; Module B (primitive consumer): calls A's get/increment.
+  ;; Values pass on the Wasm stack — no memory copy, no accessor overhead.
+  (import "a" "get_counter" (func $get (result i32)))
+  (import "a" "increment"   (func $inc))
+
+  (memory (export "b_memory") 1)
+
+  ;; inc_and_get(): increments A's counter, returns the new value.
+  ;; After merge + inline: direct global.set + global.get, zero call overhead.
+  (func (export "inc_and_get") (result i32)
+    (call $inc)
+    (call $get))
+
+  ;; inc_n(n): increments A's counter n times, returns final value.
+  (func (export "inc_n") (param $n i32) (result i32)
+    (local $i i32)
+    (block $done
+      (loop $loop
+        (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+        (call $inc)
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $loop)))
+    (call $get))
+)
+```
+
+- merged: `182` bytes
+
+#### After `wasm-merge`
+```wat
+(module
+  (type (;0;) (func (result i32)))
+  (type (;1;) (func))
+  (type (;2;) (func (param i32) (result i32)))
+  (type (;3;) (func (result i32)))
+  (type (;4;) (func))
+  (memory (;0;) 1)
+  (memory (;1;) 1)
+  (global (;0;) (mut i32) i32.const 0)
+  (export "b_memory" (memory 0))
+  (export "inc_and_get" (func 0))
+  (export "inc_n" (func 1))
+  (export "memory" (memory 1))
+  (export "get_counter" (func 2))
+  (export "increment" (func 3))
+  (func (;0;) (type 0) (result i32)
+    call 3
+    call 2
+  )
+  (func (;1;) (type 2) (param i32) (result i32)
+    (local i32)
+    block ;; label = @1
+      loop ;; label = @2
+        local.get 1
+        local.get 0
+        i32.ge_u
+        br_if 1 (;@1;)
+        call 3
+        local.get 1
+        i32.const 1
+        i32.add
+        local.set 1
+        br 0 (;@2;)
+      end
+    end
+    call 2
+  )
+  (func (;2;) (type 3) (result i32)
+    global.get 0
+  )
+  (func (;3;) (type 4)
+    global.get 0
+    i32.const 1
+    i32.add
+    global.set 0
+  )
+)
+```
+
+#### After `wasm-opt -O3 --inlining -O3`
+
+**`inc_and_get`:**
+```wat
+  (func (;0;) (type 0) (result i32)
+    global.get 0
+    i32.const 1
+    i32.add
+    global.set 0
+    global.get 0
+  )
+```
+
+**`inc_n`:**
+```wat
+  (func (;1;) (type 1) (param i32) (result i32)
+    (local i32)
+    loop ;; label = @1
+      local.get 0
+      local.get 1
+      i32.gt_u
+      if ;; label = @2
+        global.get 0
+        i32.const 1
+        i32.add
+        global.set 0
+        local.get 1
+        i32.const 1
+        i32.add
+        local.set 1
+        br 1 (;@1;)
+      end
+    end
+    global.get 0
+  )
+```
+
+---
+
+### 8. STRUCT — Point {x, y} via field accessors
+
+#### Module A
+```wat
+(module
+  ;; Module A (struct accessor): owns a Point {x: i32, y: i32} in memory.
+  ;; Exports field accessors — B reads/writes individual fields,
+  ;; never gets a raw pointer to the struct.
+  (memory (export "memory") 1)
+  (data (i32.const 0) "\03\00\00\00\04\00\00\00")  ;; Point { x: 3, y: 4 }
+
+  (func (export "get_x") (result i32)
+    (i32.load (i32.const 0)))
+
+  (func (export "get_y") (result i32)
+    (i32.load (i32.const 4)))
+
+  (func (export "set_x") (param $v i32)
+    (i32.store (i32.const 0) (local.get $v)))
+
+  (func (export "set_y") (param $v i32)
+    (i32.store (i32.const 4) (local.get $v)))
+)
+```
+
+#### Module B
+```wat
+(module
+  ;; Module B (struct consumer): accesses A's Point through field accessors.
+  ;; After merge + inline: direct i32.load/i32.store on A's memory.
+  (import "a" "get_x" (func $get_x (result i32)))
+  (import "a" "get_y" (func $get_y (result i32)))
+  (import "a" "set_x" (func $set_x (param i32)))
+  (import "a" "set_y" (func $set_y (param i32)))
+
+  (memory (export "b_memory") 1)
+
+  ;; distance_squared(): returns x*x + y*y without ever seeing raw memory.
+  (func (export "distance_squared") (result i32)
+    (i32.add
+      (i32.mul (call $get_x) (call $get_x))
+      (i32.mul (call $get_y) (call $get_y))))
+
+  ;; translate(dx, dy): shifts the point by (dx, dy).
+  (func (export "translate") (param $dx i32) (param $dy i32)
+    (call $set_x (i32.add (call $get_x) (local.get $dx)))
+    (call $set_y (i32.add (call $get_y) (local.get $dy))))
+)
+```
+
+- merged: `225` bytes
+
+#### After `wasm-merge`
+```wat
+(module
+  (type (;0;) (func (result i32)))
+  (type (;1;) (func (param i32)))
+  (type (;2;) (func (param i32 i32)))
+  (type (;3;) (func (result i32)))
+  (type (;4;) (func (param i32)))
+  (memory (;0;) 1)
+  (memory (;1;) 1)
+  (export "b_memory" (memory 0))
+  (export "distance_squared" (func 0))
+  (export "translate" (func 1))
+  (export "memory" (memory 1))
+  (export "get_x" (func 2))
+  (export "get_y" (func 3))
+  (export "set_x" (func 4))
+  (export "set_y" (func 5))
+  (func (;0;) (type 0) (result i32)
+    call 2
+    call 2
+    i32.mul
+    call 3
+    call 3
+    i32.mul
+    i32.add
+  )
+  (func (;1;) (type 2) (param i32 i32)
+    call 2
+    local.get 0
+    i32.add
+    call 4
+    call 3
+    local.get 1
+    i32.add
+    call 5
+  )
+  (func (;2;) (type 3) (result i32)
+    i32.const 0
+    i32.load 1
+  )
+  (func (;3;) (type 3) (result i32)
+    i32.const 4
+    i32.load 1
+  )
+  (func (;4;) (type 4) (param i32)
+    i32.const 0
+    local.get 0
+    i32.store 1
+  )
+  (func (;5;) (type 4) (param i32)
+    i32.const 4
+    local.get 0
+    i32.store 1
+  )
+  (data (;0;) (memory 1) (i32.const 0) "\03\00\00\00\04\00\00\00")
+)
+```
+
+#### After `wasm-opt -O3 --inlining -O3`
+
+**`distance_squared`:**
+```wat
+  (func (;0;) (type 0) (result i32)
+    (local i32)
+    i32.const 0
+    i32.load 1
+    local.tee 0
+    local.get 0
+    i32.mul
+    i32.const 4
+    i32.load 1
+    local.tee 0
+    local.get 0
+    i32.mul
+    i32.add
+  )
+```
+
+**`translate`:**
+```wat
+  (func (;1;) (type 2) (param i32 i32)
+    i32.const 0
+    local.get 0
+    i32.const 0
+    i32.load 1
+    i32.add
+    i32.store 1
+    i32.const 4
+    local.get 1
+    i32.const 4
+    i32.load 1
+    i32.add
+    i32.store 1
+  )
+```
+
+---
+
+### Primitives and structs summary
+
+| Function | Pattern | After optimization |
+|---|---|---|
+| `inc_and_get()` | primitive (global) | direct `global.set` + `global.get` — zero call overhead |
+| `inc_n(n)` | primitive (loop) | inlined increment loop — no cross-module call per iteration |
+| `distance_squared()` | struct field accessors | direct `i32.load` from A's memory — accessors eliminated |
+| `translate(dx, dy)` | struct field accessors | direct `i32.load` + `i32.store` on A's memory |
+
+**Primitives**: values pass on the Wasm stack. No memory involved, no accessor
+needed for the return value. After inlining, the call disappears entirely —
+`inc_and_get()` becomes a direct global increment and read.
+
+**Structs via field accessors**: each field has its own getter/setter. After
+inlining, these become direct `i32.load`/`i32.store` on A's memory at fixed
+offsets — identical to accessing a struct in shared memory, but with isolation
+preserved.
+
+## Part 4: GC types — type-system enforced isolation
+
+With the Wasm GC proposal, structs and arrays live on the runtime-managed
+GC heap — not in linear memory. References pass on the stack, and the type
+system enforces field access. No accessor functions or bounds checks needed:
+`struct.get`/`struct.set` are already single instructions.
+
+> Note: `wasm-merge` does not yet handle GC types. These examples show the
+> pattern — merging GC modules requires GC-aware tooling.
+
+### 9. GC STRUCT — Point {x, y} on the GC heap
+
+#### Module A
+```wat
+(module
+  ;; Module A (GC struct): owns a Point type on the GC heap.
+  ;; No linear memory needed — the runtime manages the struct.
+  ;; B receives a typed reference and uses struct.get/struct.set directly.
+  ;; The type system enforces field access — no accessor functions needed.
+
+  (type $Point (struct (field $x (mut i32)) (field $y (mut i32))))
+
+  ;; Create a new Point on the GC heap.
+  (func (export "new_point") (param $x i32) (param $y i32) (result (ref $Point))
+    (struct.new $Point (local.get $x) (local.get $y)))
+
+  ;; Read-only access to a Point — returns x + y.
+  ;; B could also call struct.get directly if it knows the type.
+  (func (export "sum_fields") (param $p (ref $Point)) (result i32)
+    (i32.add
+      (struct.get $Point $x (local.get $p))
+      (struct.get $Point $y (local.get $p))))
+
+  ;; Mutate a field — caller passes the reference, A writes through it.
+  (func (export "set_x") (param $p (ref $Point)) (param $v i32)
+    (struct.set $Point $x (local.get $p) (local.get $v)))
+)
+```
+
+#### Module B
+```wat
+(module
+  ;; Module B (GC struct consumer): receives a Point reference from A.
+  ;; Uses struct.get/struct.set directly on the reference — no accessor
+  ;; wrapper needed. The GC type system enforces field-level access:
+  ;; B can only read/write declared fields, cannot forge references,
+  ;; and cannot access A's linear memory.
+  ;;
+  ;; After merge + inline: struct.new and struct.get/set remain as-is —
+  ;; they are already single instructions. No call overhead to eliminate.
+
+  (type $Point (struct (field $x (mut i32)) (field $y (mut i32))))
+
+  (import "a" "new_point"  (func $new  (param i32 i32) (result (ref $Point))))
+  (import "a" "sum_fields" (func $sum  (param (ref $Point)) (result i32)))
+  (import "a" "set_x"      (func $setx (param (ref $Point) i32)))
+
+  ;; distance_squared(): creates a Point(3, 4), computes x*x + y*y.
+  ;; The reference lives on the GC heap — no linear memory involved.
+  (func (export "distance_squared") (result i32)
+    (local $p (ref $Point)) (local $x i32) (local $y i32)
+    (local.set $p (call $new (i32.const 3) (i32.const 4)))
+    (local.set $x (struct.get $Point $x (local.get $p)))
+    (local.set $y (struct.get $Point $y (local.get $p)))
+    (i32.add
+      (i32.mul (local.get $x) (local.get $x))
+      (i32.mul (local.get $y) (local.get $y))))
+
+  ;; mutate_and_sum(): creates a Point(1, 2), changes x to 10, returns sum.
+  (func (export "mutate_and_sum") (result i32)
+    (local $p (ref $Point))
+    (local.set $p (call $new (i32.const 1) (i32.const 2)))
+    (call $setx (local.get $p) (i32.const 10))
+    (call $sum (local.get $p)))
+)
+```
+
+### GC types summary
+
+| Pattern | Linear memory accessor | GC struct |
+|---|---|---|
+| Create | allocate in memory, return offset | `struct.new` — runtime allocates |
+| Read field | `get_x()` → `i32.load offset=0` | `struct.get $Point $x` |
+| Write field | `set_x(v)` → `i32.store offset=0` | `struct.set $Point $x` |
+| Safety | bounds check in accessor | type system — cannot access undeclared fields |
+| After inlining | direct `i32.load`/`i32.store` | already a single instruction — nothing to inline |
+| Forgery | B cannot forge a pointer (no raw address) | B cannot forge a reference (GC-managed) |
+
+**Linear memory structs** need accessor functions to maintain isolation. After
+merge + inline, these become direct loads/stores — zero-cost but requires tooling.
+
+**GC structs** need no accessor functions at all. `struct.get`/`struct.set` are
+already single instructions with type-system enforced field access. The isolation
+is built into the instruction set. GC types are the natural choice for languages
+targeting the GC proposal (Kotlin, Dart, Java, OCaml) while linear memory
+accessors serve C/C++/Rust and existing wasi-libc-based toolchains.
+
+## Part 5: Benchmarks — accessor overhead
+
+Measuring 5000000 increment calls on V8:
+
+```
+Separate (cross-module call)                11.5 ms
+Merged (call preserved)                      3.8 ms (-67%)
+Merged + optimized (inlined)                 3.8 ms (-67%)
+```
+
+### Benchmark observations
+
+- **Separate modules**: each call crosses the module boundary — the runtime
+  cannot inline across modules (V8 compiles at the module level).
+- **Merged (call preserved)**: both functions are in the same module but the
+  call instruction remains. V8 can now inline at JIT time.
+- **Merged + optimized**: `wasm-opt` inlines the call ahead of time. The loop
+  body is a direct `global.set` + `global.get` — no call at all.
+
+The progression from separate → merged → optimized shows the full zero-cost
+path: module boundary eliminated by merge, call overhead eliminated by inlining.
+
 ## Mapping to source languages
 
 | Pattern | Rust | C++ | C |

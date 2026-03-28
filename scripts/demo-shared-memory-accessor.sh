@@ -202,7 +202,193 @@ flag's value statically.
 
 OWN_SUMMARY
 
-# ════════════════════════════════════════════════════��══════════════════
+# ════════════════════════════════════════════════════════════════════════
+echo "## Part 3: Primitives and structs — trivial zero-cost patterns"
+echo ""
+echo "When the cross-module interface passes primitive values (i32, i64, f32, f64)"
+echo "or struct fields via individual accessors, values travel on the Wasm stack —"
+echo "no memory copy, no bounds check needed."
+echo ""
+
+run_pipeline \
+  "7. PRIMITIVE — counter via global, values on the stack" \
+  primitive/a.wat primitive/b.wat primitive \
+  inc_and_get inc_n
+
+run_pipeline \
+  "8. STRUCT — Point {x, y} via field accessors" \
+  struct/a.wat struct/b.wat struct \
+  distance_squared translate
+
+cat <<'PRIM_SUMMARY'
+### Primitives and structs summary
+
+| Function | Pattern | After optimization |
+|---|---|---|
+| `inc_and_get()` | primitive (global) | direct `global.set` + `global.get` — zero call overhead |
+| `inc_n(n)` | primitive (loop) | inlined increment loop — no cross-module call per iteration |
+| `distance_squared()` | struct field accessors | direct `i32.load` from A's memory — accessors eliminated |
+| `translate(dx, dy)` | struct field accessors | direct `i32.load` + `i32.store` on A's memory |
+
+**Primitives**: values pass on the Wasm stack. No memory involved, no accessor
+needed for the return value. After inlining, the call disappears entirely —
+`inc_and_get()` becomes a direct global increment and read.
+
+**Structs via field accessors**: each field has its own getter/setter. After
+inlining, these become direct `i32.load`/`i32.store` on A's memory at fixed
+offsets — identical to accessing a struct in shared memory, but with isolation
+preserved.
+
+PRIM_SUMMARY
+
+# ════════════════════════════════════════════════════════════════════════
+echo "## Part 4: GC types — type-system enforced isolation"
+echo ""
+echo "With the Wasm GC proposal, structs and arrays live on the runtime-managed"
+echo "GC heap — not in linear memory. References pass on the stack, and the type"
+echo "system enforces field access. No accessor functions or bounds checks needed:"
+echo "\`struct.get\`/\`struct.set\` are already single instructions."
+echo ""
+echo "> Note: \`wasm-merge\` does not yet handle GC types. These examples show the"
+echo "> pattern — merging GC modules requires GC-aware tooling."
+echo ""
+
+echo "### 9. GC STRUCT — Point {x, y} on the GC heap"
+echo ""
+echo "#### Module A"
+echo '```wat'
+cat "$IN/gc/a.wat"
+echo '```'
+echo ""
+echo "#### Module B"
+echo '```wat'
+cat "$IN/gc/b.wat"
+echo '```'
+echo ""
+
+cat <<'GC_SUMMARY'
+### GC types summary
+
+| Pattern | Linear memory accessor | GC struct |
+|---|---|---|
+| Create | allocate in memory, return offset | `struct.new` — runtime allocates |
+| Read field | `get_x()` → `i32.load offset=0` | `struct.get $Point $x` |
+| Write field | `set_x(v)` → `i32.store offset=0` | `struct.set $Point $x` |
+| Safety | bounds check in accessor | type system — cannot access undeclared fields |
+| After inlining | direct `i32.load`/`i32.store` | already a single instruction — nothing to inline |
+| Forgery | B cannot forge a pointer (no raw address) | B cannot forge a reference (GC-managed) |
+
+**Linear memory structs** need accessor functions to maintain isolation. After
+merge + inline, these become direct loads/stores — zero-cost but requires tooling.
+
+**GC structs** need no accessor functions at all. `struct.get`/`struct.set` are
+already single instructions with type-system enforced field access. The isolation
+is built into the instruction set. GC types are the natural choice for languages
+targeting the GC proposal (Kotlin, Dart, Java, OCaml) while linear memory
+accessors serve C/C++/Rust and existing wasi-libc-based toolchains.
+
+GC_SUMMARY
+
+# ════════════════════════════════════════════════════════════════════════
+echo "## Part 5: Benchmarks — accessor overhead"
+echo ""
+
+# Build a benchmark that measures accessor call overhead
+# Compare: separate modules (cross-module call) vs merged vs merged+optimized
+cat > "$OUT/bench_accessor.wat" << 'EOF'
+(module
+  (import "a" "increment" (func $inc))
+  (import "a" "get_counter" (func $get (result i32)))
+  (memory (export "b_memory") 1)
+  (func (export "bench") (param $n i32) (result i32)
+    (local $i i32)
+    (block $done
+      (loop $loop
+        (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+        (call $inc)
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $loop)))
+    (call $get))
+)
+EOF
+wasm-tools parse "$OUT/bench_accessor.wat" -o "$OUT/bench_accessor.wasm"
+wasm-tools parse "$IN/primitive/a.wat" -o "$OUT/primitive_a.wasm"
+
+# Merged (calls preserved)
+$WASM_MERGE "$OUT/bench_accessor.wasm=b" "$OUT/primitive_a.wasm=a" -o "$OUT/bench_accessor_merged.wasm"
+# Merged + optimized (calls inlined)
+if command -v wasm-opt &>/dev/null; then
+  wasm-opt -O3 --inlining -O3 --enable-multimemory "$OUT/bench_accessor_merged.wasm" -o "$OUT/bench_accessor_opt.wasm"
+fi
+
+N_CALLS=5000000
+
+echo "Measuring $N_CALLS increment calls on V8:"
+echo ""
+echo '```'
+node --eval "
+const { readFileSync } = require('fs');
+const N = $N_CALLS;
+
+// Separate modules (cross-module call)
+const a_mod = new WebAssembly.Module(readFileSync('$OUT/primitive_a.wasm'));
+const a_inst = new WebAssembly.Instance(a_mod);
+const b_mod = new WebAssembly.Module(readFileSync('$OUT/bench_accessor.wasm'));
+const b_inst = new WebAssembly.Instance(b_mod, { a: a_inst.exports });
+
+// Merged (multi-memory, calls preserved)
+const merged_mod = new WebAssembly.Module(readFileSync('$OUT/bench_accessor_merged.wasm'));
+const merged_inst = new WebAssembly.Instance(merged_mod);
+
+// Merged + optimized (calls inlined)
+const opt_mod = new WebAssembly.Module(readFileSync('$OUT/bench_accessor_opt.wasm'));
+const opt_inst = new WebAssembly.Instance(opt_mod);
+
+const targets = [
+  ['Separate (cross-module call)', b_inst],
+  ['Merged (call preserved)',      merged_inst],
+  ['Merged + optimized (inlined)', opt_inst],
+];
+
+// Warmup
+for (const [, inst] of targets) for (let i = 0; i < 50000; i++) inst.exports.bench(1);
+
+const runs = 5;
+const results = targets.map(() => []);
+for (let r = 0; r < runs; r++) {
+  for (let t = 0; t < targets.length; t++) {
+    const t0 = performance.now();
+    targets[t][1].exports.bench(N);
+    results[t].push(performance.now() - t0);
+  }
+}
+
+const base = results[0].sort((a,b)=>a-b)[Math.floor(runs/2)];
+for (let t = 0; t < targets.length; t++) {
+  const med = results[t].sort((a,b)=>a-b)[Math.floor(runs/2)];
+  const pct = t === 0 ? '' : ' (' + ((med / base - 1) * 100).toFixed(0) + '%)';
+  console.log(targets[t][0].padEnd(40) + med.toFixed(1).padStart(8) + ' ms' + pct);
+}
+" 2>&1
+echo '```'
+echo ""
+
+cat <<'BENCH_SUMMARY'
+### Benchmark observations
+
+- **Separate modules**: each call crosses the module boundary — the runtime
+  cannot inline across modules (V8 compiles at the module level).
+- **Merged (call preserved)**: both functions are in the same module but the
+  call instruction remains. V8 can now inline at JIT time.
+- **Merged + optimized**: `wasm-opt` inlines the call ahead of time. The loop
+  body is a direct `global.set` + `global.get` — no call at all.
+
+The progression from separate → merged → optimized shows the full zero-cost
+path: module boundary eliminated by merge, call overhead eliminated by inlining.
+
+BENCH_SUMMARY
+
+# ════════════════════════════════════════════════════════════════════════
 cat <<'FOOTER'
 ## Mapping to source languages
 

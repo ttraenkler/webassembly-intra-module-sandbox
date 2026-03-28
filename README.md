@@ -4,18 +4,19 @@ While shared-nothing linking usually comes at the cost of function calls not bei
 
 Merging multiple Wasm modules into a single core module today means **shared-everything** — all functions share one memory, one global space, no isolation. This prototype demonstrates that modules can be merged while **maintaining shared-nothing isolation** between them, with **zero runtime cost** after optimization in many cases — no spec changes required.
 
-## Efficient & secure cross module function calls
+## Cross-module function calls
 
-Multi-memory lets each module keep its own linear memory after merge. Module A owns memory; Module B accesses it only through exported accessor functions — never via a raw pointer. After merging and optimizing, the accessor call is **completely eliminated** — `read_first()` compiles to a direct `i32.load8_u`, identical to shared-everything.
+Multi-memory lets each module keep its own linear memory after merge. Module A owns memory; Module B accesses it only through exported functions — never via a raw pointer. After merging and optimizing, the call is **completely eliminated**.
 
-Six patterns demonstrate security and ownership semantics:
+- **Primitives** (i32, i64, f32, f64): values pass on the Wasm stack — no memory copy. After inlining, `inc_and_get()` becomes a direct `global.set` + `global.get`.
+- **Structs** via field accessors: `get_x()`, `set_y()` inline to direct `i32.load`/`i32.store` on A's memory at fixed offsets.
+- **GC types** (Wasm GC proposal): `structref`/`arrayref` pass by reference on the stack — the runtime enforces type safety and field access, no linear memory or accessor functions needed. A natural complement for languages that target GC types instead of linear memory.
+- **Memory regions**: bounds-checked byte accessors, opaque handles via funcref table.
+- **Ownership**: read-only borrow, mutable borrow (call-scoped), move/transfer with use-after-move trap.
 
-- **Security**: insecure (raw index), bounds-checked, opaque handle via funcref table
-- **Ownership**: read-only borrow, mutable borrow (call-scoped), move/transfer with use-after-move trap
+See [ACCESSOR.md](docs/ACCESSOR.md) for full WAT source, optimized disassembly, and benchmarks.
 
-See [ACCESSOR.md](docs/ACCESSOR.md) for full WAT source, merged output, and optimized disassembly.
-
-## Efficient & secure shared library linking without N full copies
+## Shared library linking
 
 N consumer modules can share a single library (e.g. wasi-libc) while maintaining independent per-instance state. Two modes:
 
