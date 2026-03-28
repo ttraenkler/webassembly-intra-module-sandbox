@@ -1,10 +1,36 @@
-## Prototype: Shared Library Linking for Multiply-Instantiated Wasm Modules
+## Prototype: Shared Library Linking for Multiple Instantiated Wasm Modules
 
 **Repo**: [https://github.com/ttraenkler/webassembly-intra-module-sandbox](https://github.com/ttraenkler/webassembly-intra-module-sandbox)
 
 ### Problem
 
-When lowering components into flat core Wasm, shared libraries like wasi-libc may be instantiated N times. Today the options are: duplicate every function body N times (O(N) binary size), or keep the library as a separate module instantiated N times (each instance gets its own memory and globals, but prevents cross-module inlining in V8 which compiles at the module level). Core Wasm has no portable linking model and no way for a single function body to reference different memory indices for different callers — the memory index is a static immediate.
+When lowering components into flat core Wasm, shared libraries like wasi-libc may be instantiated N times — once per consumer that imports it. Each instance needs its own memory and globals (heap, stack pointer). After merging into a single multi-memory module, each consumer's memory becomes a separate memory index (0, 1, 2, ...).
+
+The core constraint: **every `i32.load`/`i32.store` in Wasm takes the memory index as a static immediate** — baked into the bytecode at compile time. A single `malloc` function body can only say `i32.load memory=0`; it cannot say "load from whichever memory my caller uses." There is no `i32.load memory=$variable`.
+
+This means a shared `malloc` that serves N consumers with N different memories cannot exist as a single function body in core Wasm today. The options are:
+
+1. **Duplicate** every function body N times, each hardcoded to a different memory — O(N) binary size
+2. **Keep separate modules** — the runtime instantiates the library N times (correct, but prevents cross-module inlining in V8 which compiles at the module level)
+3. **Dispatch at runtime** — wrap every memory access in a `br_table` that selects the correct memory index based on a parameter: one function body, but overhead per memory access
+
+### Why `br_table`?
+
+Since Wasm has no instruction for "load from memory index on the stack", the dispatch wrapper emulates it:
+
+```wat
+;; One shared function body for i32.load across N memories
+(func $dispatch_i32_load (param $addr i32) (param $instance i32) (result i32)
+  (block $default (block $b1 (block $b0
+    (br_table $b0 $b1 $default (local.get $instance)))
+    (return (i32.load memory=0 (local.get $addr))))  ;; instance 0
+    (return (i32.load memory=1 (local.get $addr))))  ;; instance 1
+  (unreachable))
+```
+
+Every `i32.load` in the shared library is replaced with a call to this wrapper, passing the instance index. This is the smallest possible binary (one copy of each function), but adds a function call + branch per memory access.
+
+The **inlined mode** avoids this by creating N copies of each state-touching function with the correct memory index baked in — no dispatch, but O(N) for those functions (pure functions stay shared).
 
 ### Solution
 
