@@ -76,6 +76,8 @@ wasm-merge component.wasm -o merged.wasm
 - `--specialize --lib <label>`: enable per-instance inlined mode for
   the module with the given label.
 - `--dispatch --lib <label>`: enable shared mode with `br_table` dispatch.
+- `--verify`: post-merge isolation check. Validates every function only
+  accesses its allowed memory indices. Exits with error if violations found.
 
 ## How inlined mode works
 

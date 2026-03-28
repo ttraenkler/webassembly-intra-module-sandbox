@@ -40,7 +40,7 @@ pub fn verify_isolation(wasm: &[u8], manifest: &MergeManifest) -> Vec<Violation>
             if let Ok(ops) = body.get_operators_reader() {
                 for op in ops {
                     let Ok(op) = op else { continue };
-                    if let Some((mem_idx, name)) = extract_memory_index(&op) {
+                    for (mem_idx, name) in extract_memory_indices(&op) {
                         let is_violation = match allowed {
                             Some(Some(set)) => !set.contains(&mem_idx),
                             Some(None) => true, // no memory access allowed
@@ -62,39 +62,39 @@ pub fn verify_isolation(wasm: &[u8], manifest: &MergeManifest) -> Vec<Violation>
     violations
 }
 
-/// Extract the memory index from a memory instruction, if any.
-fn extract_memory_index(op: &Operator) -> Option<(u32, String)> {
+/// Extract memory indices from a memory instruction (most have one, memory.copy has two).
+fn extract_memory_indices(op: &Operator) -> Vec<(u32, String)> {
     match op {
-        Operator::I32Load { memarg } => Some((memarg.memory, "i32.load".into())),
-        Operator::I64Load { memarg } => Some((memarg.memory, "i64.load".into())),
-        Operator::F32Load { memarg } => Some((memarg.memory, "f32.load".into())),
-        Operator::F64Load { memarg } => Some((memarg.memory, "f64.load".into())),
-        Operator::I32Load8S { memarg } => Some((memarg.memory, "i32.load8_s".into())),
-        Operator::I32Load8U { memarg } => Some((memarg.memory, "i32.load8_u".into())),
-        Operator::I32Load16S { memarg } => Some((memarg.memory, "i32.load16_s".into())),
-        Operator::I32Load16U { memarg } => Some((memarg.memory, "i32.load16_u".into())),
-        Operator::I64Load8S { memarg } => Some((memarg.memory, "i64.load8_s".into())),
-        Operator::I64Load8U { memarg } => Some((memarg.memory, "i64.load8_u".into())),
-        Operator::I64Load16S { memarg } => Some((memarg.memory, "i64.load16_s".into())),
-        Operator::I64Load16U { memarg } => Some((memarg.memory, "i64.load16_u".into())),
-        Operator::I64Load32S { memarg } => Some((memarg.memory, "i64.load32_s".into())),
-        Operator::I64Load32U { memarg } => Some((memarg.memory, "i64.load32_u".into())),
-        Operator::I32Store { memarg } => Some((memarg.memory, "i32.store".into())),
-        Operator::I64Store { memarg } => Some((memarg.memory, "i64.store".into())),
-        Operator::F32Store { memarg } => Some((memarg.memory, "f32.store".into())),
-        Operator::F64Store { memarg } => Some((memarg.memory, "f64.store".into())),
-        Operator::I32Store8 { memarg } => Some((memarg.memory, "i32.store8".into())),
-        Operator::I32Store16 { memarg } => Some((memarg.memory, "i32.store16".into())),
-        Operator::I64Store8 { memarg } => Some((memarg.memory, "i64.store8".into())),
-        Operator::I64Store16 { memarg } => Some((memarg.memory, "i64.store16".into())),
-        Operator::I64Store32 { memarg } => Some((memarg.memory, "i64.store32".into())),
-        Operator::MemorySize { mem, .. } => Some((*mem, "memory.size".into())),
-        Operator::MemoryGrow { mem, .. } => Some((*mem, "memory.grow".into())),
-        Operator::MemoryFill { mem } => Some((*mem, "memory.fill".into())),
-        Operator::MemoryCopy { dst_mem, src_mem } => {
-            // Return the first non-zero or just dst; caller checks both
-            Some((*dst_mem, format!("memory.copy dst={dst_mem} src={src_mem}")))
-        }
-        _ => None,
+        Operator::I32Load { memarg } => vec![(memarg.memory, "i32.load".into())],
+        Operator::I64Load { memarg } => vec![(memarg.memory, "i64.load".into())],
+        Operator::F32Load { memarg } => vec![(memarg.memory, "f32.load".into())],
+        Operator::F64Load { memarg } => vec![(memarg.memory, "f64.load".into())],
+        Operator::I32Load8S { memarg } => vec![(memarg.memory, "i32.load8_s".into())],
+        Operator::I32Load8U { memarg } => vec![(memarg.memory, "i32.load8_u".into())],
+        Operator::I32Load16S { memarg } => vec![(memarg.memory, "i32.load16_s".into())],
+        Operator::I32Load16U { memarg } => vec![(memarg.memory, "i32.load16_u".into())],
+        Operator::I64Load8S { memarg } => vec![(memarg.memory, "i64.load8_s".into())],
+        Operator::I64Load8U { memarg } => vec![(memarg.memory, "i64.load8_u".into())],
+        Operator::I64Load16S { memarg } => vec![(memarg.memory, "i64.load16_s".into())],
+        Operator::I64Load16U { memarg } => vec![(memarg.memory, "i64.load16_u".into())],
+        Operator::I64Load32S { memarg } => vec![(memarg.memory, "i64.load32_s".into())],
+        Operator::I64Load32U { memarg } => vec![(memarg.memory, "i64.load32_u".into())],
+        Operator::I32Store { memarg } => vec![(memarg.memory, "i32.store".into())],
+        Operator::I64Store { memarg } => vec![(memarg.memory, "i64.store".into())],
+        Operator::F32Store { memarg } => vec![(memarg.memory, "f32.store".into())],
+        Operator::F64Store { memarg } => vec![(memarg.memory, "f64.store".into())],
+        Operator::I32Store8 { memarg } => vec![(memarg.memory, "i32.store8".into())],
+        Operator::I32Store16 { memarg } => vec![(memarg.memory, "i32.store16".into())],
+        Operator::I64Store8 { memarg } => vec![(memarg.memory, "i64.store8".into())],
+        Operator::I64Store16 { memarg } => vec![(memarg.memory, "i64.store16".into())],
+        Operator::I64Store32 { memarg } => vec![(memarg.memory, "i64.store32".into())],
+        Operator::MemorySize { mem, .. } => vec![(*mem, "memory.size".into())],
+        Operator::MemoryGrow { mem, .. } => vec![(*mem, "memory.grow".into())],
+        Operator::MemoryFill { mem } => vec![(*mem, "memory.fill".into())],
+        Operator::MemoryCopy { dst_mem, src_mem } => vec![
+            (*dst_mem, "memory.copy (dst)".into()),
+            (*src_mem, "memory.copy (src)".into()),
+        ],
+        _ => vec![],
     }
 }
