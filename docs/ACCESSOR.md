@@ -11,6 +11,14 @@ Two dimensions are demonstrated:
 
 All patterns work today with multi-memory, `wasm-merge`, and `wasm-opt` — no spec changes needed.
 
+## Contents
+
+- [Part 1: Security](#part-1-security--accessor-design-comparison) — insecure, bounds-checked, opaque handle
+- [Part 2: Ownership](#part-2-ownership--borrow-and-move-semantics) — read-only borrow, mutable borrow, move
+- [Part 3: Primitives and structs](#part-3-primitives-and-structs--trivial-zero-cost-patterns) — values on the stack, field accessors
+- [Part 4: GC types](#part-4-gc-types--type-system-enforced-isolation) — struct.get/struct.set, no accessor needed
+- [Part 5: Benchmarks](#part-5-benchmarks--accessor-overhead) — separate vs merged vs optimized
+
 ## Part 1: Security — accessor design comparison
 
 All three variants expose the string `"hello"` from Module A
@@ -1702,9 +1710,9 @@ accessors serve C/C++/Rust and existing wasi-libc-based toolchains.
 Measuring 5000000 increment calls on V8:
 
 ```
-Separate (cross-module call)                11.5 ms
-Merged (call preserved)                      3.8 ms (-67%)
-Merged + optimized (inlined)                 3.8 ms (-67%)
+Separate (cross-module call)                11.2 ms
+Merged (call preserved)                      3.8 ms (-66%)
+Merged + optimized (inlined)                 3.9 ms (-66%)
 ```
 
 ### Benchmark observations

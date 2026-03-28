@@ -16,6 +16,96 @@ Multi-memory lets each module keep its own linear memory after merge. Module A o
 
 See [ACCESSOR.md](docs/ACCESSOR.md) for full WAT source, optimized disassembly, and benchmarks.
 
+### Example: reading a byte
+
+```c
+// module_a.c — compiled to a.wasm
+static char data[] = "hello";
+
+// Accessor: B can read bytes but never gets a pointer into A's memory
+int string_byte(int i) {
+    if (i < 0 || i >= 5) __builtin_trap();
+    return data[i];
+}
+```
+
+```c
+// module_b.c — compiled to b.wasm, imports string_byte from A
+int string_byte(int i);  // cross-module import
+
+int read_first() {
+    return string_byte(0);
+}
+```
+
+After `wasm-merge` + `wasm-opt`, the merged code behaves as if:
+
+```c
+// merged — conceptual C equivalent of what the optimizer produces
+static char a_data[] = "hello";  // A's memory (memory 1)
+
+int read_first() {
+    return a_data[0];  // direct load — no call, no bounds check
+}
+```
+
+The function call, the bounds check (0 < 5 is provably true), and the module boundary are all eliminated. A dynamic index like `string_byte(i)` preserves the bounds check — the optimizer only removes what it can prove safe.
+
+### Example: calling toupper from a shared libc
+
+```c
+// libc (shared library) — standard C implementation
+#include <ctype.h>
+int toupper(int c) {
+    return (c >= 'a' && c <= 'z') ? c - 32 : c;
+}
+
+void* malloc(size_t size);  // allocator with per-instance heap
+void  free(void* ptr);
+```
+
+```c
+// module_b.c — imports toupper and malloc from libc
+#include <ctype.h>
+#include <stdlib.h>
+
+char* uppercase(const char* src, int len) {
+    char* dst = malloc(len + 1);
+    for (int i = 0; i < len; i++)
+        dst[i] = toupper(src[i]);       // cross-module call per character
+    dst[len] = '\0';
+    return dst;
+}
+
+int main() {
+    char* result = uppercase("hello", 5);  // → "HELLO"
+    free(result);
+}
+```
+
+After merge + optimize, `toupper` is inlined and `malloc` uses B's own heap:
+
+```c
+// merged + optimized — conceptual C equivalent
+int main() {
+    // inlined malloc on B's memory
+    char* dst = &inst1_heap[inst1_heap_end];
+    inst1_heap_end += 6;
+
+    // inlined uppercase with inlined toupper
+    const char* src = "hello";
+    for (int i = 0; i < 5; i++)
+        dst[i] = (src[i] >= 'a' && src[i] <= 'z')
+                 ? src[i] - 32 : src[i];
+    dst[5] = '\0';
+    // dst → "HELLO"
+
+    // inlined free (bump allocator — nop)
+}
+```
+
+All three accessor calls inline to direct memory operations on A's memory. B never receives a pointer — it cannot read outside the declared region. The same pattern applies to `malloc`/`free` calls through a shared library.
+
 ## Shared library linking
 
 N consumer modules can share a single library (e.g. wasi-libc) while maintaining independent per-instance state. Two modes:
@@ -23,10 +113,87 @@ N consumer modules can share a single library (e.g. wasi-libc) while maintaining
 - **Inlined** (`--specialize`): per-consumer specialized copies, static memory indices. After `wasm-opt -O4` — **faster than baseline**.
 - **Shared** (`--dispatch`): `br_table` dispatch, one copy of function bodies — **smallest binary** (-98% at N=100).
 
-```bash
-wasm-merge a.wasm=inst0 b.wasm=inst1 lib.wasm=lib --specialize --lib lib -o merged.wasm
-wasm-merge a.wasm=inst0 b.wasm=inst1 lib.wasm=lib --dispatch --lib lib -o merged.wasm
+### Example: two apps sharing wasi-libc
+
+```c
+// app_a.c — consumer 0
+#include <stdlib.h>
+void* alloc_a(int size) { return malloc(size); }
+
+// app_b.c — consumer 1
+#include <stdlib.h>
+void* alloc_b(int size) { return malloc(size); }
 ```
+
+Without merging: ship 3 modules (app_a.wasm, app_b.wasm, libc.wasm) — runtime instantiates libc twice, no cross-module inlining. Or duplicate libc into each consumer — O(N) binary size.
+
+```bash
+# Merge all three into one module:
+wasm-merge app_a.wasm=inst0 app_b.wasm=inst1 libc.wasm=lib --specialize --lib lib -o merged.wasm
+```
+
+After merge, each consumer gets its own memory and globals. The library's `malloc` is shared — one copy of the function body with a per-consumer memory selector:
+
+```c
+// wasi-libc (the shared library) — original, unmodified
+static char heap[...];
+static int  heap_end;
+
+void* malloc(int size) {
+    int old = heap_end;
+    heap_end += align_up(size, 8);
+    return &heap[old];
+}
+```
+
+After merge, `malloc` is rewritten to select the correct memory per consumer:
+
+```c
+// merged — conceptual C equivalent
+static char inst0_heap[...];   // memory 0 — app_a's heap
+static char inst1_heap[...];   // memory 1 — app_b's heap
+static int  inst0_heap_end;    // app_a's allocator state
+static int  inst1_heap_end;    // app_b's allocator state
+
+// One shared malloc — selects memory at runtime via instance index
+void* shared_malloc(int size, int instance) {
+    char* heap     = (instance == 0) ? inst0_heap     : inst1_heap;
+    int*  heap_end = (instance == 0) ? &inst0_heap_end : &inst1_heap_end;
+    int old = *heap_end;
+    *heap_end += align_up(size, 8);       // align_up shared as-is (pure)
+    return &heap[old];
+}
+
+// Shell wrappers — hardwire the instance index
+void* alloc_a(int size) { return shared_malloc(size, 0); }
+void* alloc_b(int size) { return shared_malloc(size, 1); }
+```
+
+A main function calling both:
+
+```c
+void _start() {
+    void* a = alloc_a(64);   // → shared_malloc(64, 0) → inst0_heap
+    void* b = alloc_b(64);   // → shared_malloc(64, 1) → inst1_heap
+}
+```
+
+After `wasm-opt -O4`, the instance index is constant-propagated, the switch is eliminated, and the calls are inlined:
+
+```c
+// optimized — conceptual C equivalent
+void _start() {
+    int old_a = inst0_heap_end;
+    inst0_heap_end += 64;                // malloc inlined, memory 0 baked in
+    void* a = &inst0_heap[old_a];
+
+    int old_b = inst1_heap_end;
+    inst1_heap_end += 64;                // malloc inlined, memory 1 baked in
+    void* b = &inst1_heap[old_b];
+}
+```
+
+App A and B are fully isolated — each has its own memory and allocator state — but share one copy of `align_up` and run in a single module with no cross-module call overhead.
 
 See [SHARED-LIBRARY.md](docs/SHARED-LIBRARY.md) for the problem statement and [BENCHMARK.md](docs/BENCHMARK.md) for results.
 
