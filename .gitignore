@@ -1,9 +1,7 @@
 wasm-merge/target/
+output/
 *.wasm
-merged.wat
-optimized.wat
-component-merged.wat
-component-optimized.wat
-insecure_*.wat
-bounded_*.wat
-handle_*.wat
+*.wat
+!input/
+!input/*.wat
+!input/*.wasm

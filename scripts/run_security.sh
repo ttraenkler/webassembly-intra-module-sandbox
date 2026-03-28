@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Run from repo root regardless of where the script is invoked
+cd "$(dirname "$0")/.."
+
 # Ensure cargo-installed binaries are on PATH
 export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
 
 WASM_MERGE="cargo run --manifest-path wasm-merge/Cargo.toml --release --quiet --"
+IN=input
+OUT=output
+mkdir -p "$OUT"
 
 # Helper: compile, merge, optimize, show full modules
 run_pipeline() {
@@ -16,45 +22,45 @@ run_pipeline() {
   echo "#### Module A"
   echo ""
   echo '```wat'
-  cat "$a_wat"
+  cat "$IN/$a_wat"
   echo '```'
   echo ""
   echo "#### Module B"
   echo ""
   echo '```wat'
-  cat "$b_wat"
+  cat "$IN/$b_wat"
   echo '```'
   echo ""
 
   # Compile
-  wasm-tools parse "$a_wat" -o "${prefix}_a.wasm"
-  wasm-tools parse "$b_wat" -o "${prefix}_b.wasm"
-  echo "- compiled: \`$(wc -c < "${prefix}_a.wasm")\` + \`$(wc -c < "${prefix}_b.wasm")\` bytes"
+  wasm-tools parse "$IN/$a_wat" -o "$OUT/${prefix}_a.wasm"
+  wasm-tools parse "$IN/$b_wat" -o "$OUT/${prefix}_b.wasm"
+  echo "- compiled: \`$(wc -c < "$OUT/${prefix}_a.wasm")\` + \`$(wc -c < "$OUT/${prefix}_b.wasm")\` bytes"
 
   # Merge
-  $WASM_MERGE "${prefix}_b.wasm=b" "${prefix}_a.wasm=a" -o "${prefix}_merged.wasm"
-  echo "- merged: \`$(wc -c < "${prefix}_merged.wasm")\` bytes"
+  $WASM_MERGE "$OUT/${prefix}_b.wasm=b" "$OUT/${prefix}_a.wasm=a" -o "$OUT/${prefix}_merged.wasm"
+  echo "- merged: \`$(wc -c < "$OUT/${prefix}_merged.wasm")\` bytes"
 
   # Disassemble merged
-  wasm-tools print "${prefix}_merged.wasm" -o "${prefix}_merged.wat"
+  wasm-tools print "$OUT/${prefix}_merged.wasm" -o "$OUT/${prefix}_merged.wat"
 
   echo ""
   echo "#### After \`wasm-merge\`"
   echo ""
   echo '```wat'
-  cat "${prefix}_merged.wat"
+  cat "$OUT/${prefix}_merged.wat"
   echo '```'
   echo ""
 
   # Optimize (if wasm-opt available)
   if command -v wasm-opt &>/dev/null; then
-    wasm-opt -O3 --inlining -O3 --enable-multimemory "${prefix}_merged.wasm" -o "${prefix}_optimized.wasm"
-    wasm-tools print "${prefix}_optimized.wasm" -o "${prefix}_optimized.wat"
+    wasm-opt -O3 --inlining -O3 --enable-multimemory "$OUT/${prefix}_merged.wasm" -o "$OUT/${prefix}_optimized.wasm"
+    wasm-tools print "$OUT/${prefix}_optimized.wasm" -o "$OUT/${prefix}_optimized.wat"
 
     echo "#### After \`wasm-opt -O3 --inlining -O3\`"
     echo ""
     echo '```wat'
-    cat "${prefix}_optimized.wat"
+    cat "$OUT/${prefix}_optimized.wat"
     echo '```'
     echo ""
 
@@ -62,10 +68,10 @@ run_pipeline() {
     echo "#### Optimized functions"
     echo ""
     for func_name in read_first read_oob read_at_3 read_at; do
-      fidx=$(grep "export \"${func_name}\"" "${prefix}_optimized.wat" | grep -o 'func [0-9]*' | grep -o '[0-9]*')
+      fidx=$(grep "export \"${func_name}\"" "$OUT/${prefix}_optimized.wat" | grep -o 'func [0-9]*' | grep -o '[0-9]*')
       body=""
       if [ -n "$fidx" ]; then
-        body=$(sed -n "/^  (func (;${fidx};)/,/^  )/p" "${prefix}_optimized.wat")
+        body=$(sed -n "/^  (func (;${fidx};)/,/^  )/p" "$OUT/${prefix}_optimized.wat")
       fi
       if [ -n "$body" ]; then
         echo "**\`${func_name}\`:**"
@@ -118,11 +124,10 @@ if command -v wasm-opt &>/dev/null; then
     for entry in insecure:INSECURE bounded:"INLINE\ CHECK" handle:"TABLE\ INDIRECTION"; do
       name="${entry%%:*}"; label="${entry#*:}"
       label="${label//\\/}"
-      # Find the function index for this export name, then extract that function body
-      fidx=$(grep "export \"${func_name}\"" "${name}_optimized.wat" | grep -o 'func [0-9]*' | grep -o '[0-9]*')
+      fidx=$(grep "export \"${func_name}\"" "$OUT/${name}_optimized.wat" | grep -o 'func [0-9]*' | grep -o '[0-9]*')
       body=""
       if [ -n "$fidx" ]; then
-        body=$(sed -n "/^  (func (;${fidx};)/,/^  )/p" "${name}_optimized.wat")
+        body=$(sed -n "/^  (func (;${fidx};)/,/^  )/p" "$OUT/${name}_optimized.wat")
       fi
       if [ -n "$body" ]; then
         echo "**${label}:**"
@@ -179,6 +184,6 @@ no safety at any level.
 for provably-safe accesses, minimal overhead for dynamic ones.**
 SUMMARY
 
-} > SECURITY.md 2>/dev/null
+} > docs/SECURITY.md 2>/dev/null
 
-echo "Wrote SECURITY.md"
+echo "Wrote docs/SECURITY.md"

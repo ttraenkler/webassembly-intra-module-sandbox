@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use wasm_encoder::{
     CodeSection, DataSection, ElementSection, ExportKind, ExportSection, FunctionSection,
-    GlobalSection, MemorySection, Module, TableSection, TypeSection,
-    reencode::Reencode,
+    GlobalSection, GlobalType, ImportSection, MemorySection, MemoryType, Module, TableSection,
+    TableType, TypeSection,
+    reencode::{self, Reencode},
 };
 use wasmparser::{Parser, Payload};
 
@@ -121,7 +122,9 @@ fn scan_module(wasm: &[u8]) -> Result<ModuleInfo, String> {
 }
 
 /// Merge the component's core modules into a single multi-memory core module.
-pub fn merge(component: &Component) -> Result<Vec<u8>, String> {
+/// If `exports_from` is Some(label), only re-export from the module with that label.
+/// Otherwise, re-export from all modules.
+pub fn merge(component: &Component, exports_from: Option<&str>) -> Result<Vec<u8>, String> {
     let infos: Vec<ModuleInfo> = component
         .modules
         .iter()
@@ -180,8 +183,69 @@ pub fn merge(component: &Component) -> Result<Vec<u8>, String> {
         global_base: u32,
     }
 
+    // ── Collect unresolved imports ─────────────────────────────────────
+    // First pass: find all imports that can't be resolved, deduplicate.
+    #[derive(Clone, Hash, Eq, PartialEq)]
+    #[allow(dead_code)]
+    struct UnresolvedImport {
+        module: String,
+        field: String,
+        tyref: String, // serialized for dedup
+    }
+    let mut unresolved_funcs: Vec<(String, String, u32)> = Vec::new(); // (mod, field, type_idx from first module that imports it)
+    let mut unresolved_mems: Vec<(String, String, wasmparser::MemoryType)> = Vec::new();
+    let mut unresolved_globals: Vec<(String, String, wasmparser::GlobalType)> = Vec::new();
+    let mut unresolved_tables: Vec<(String, String, wasmparser::TableType)> = Vec::new();
+    let mut seen_unresolved: HashSet<(String, String)> = HashSet::new();
+
+    for &mi in &module_order {
+        let info = &infos[mi];
+        for (mod_name, field, tyref) in &info.imports {
+            let key = (mod_name.clone(), field.clone());
+            if export_map.contains_key(&key) { continue; }
+            if !seen_unresolved.insert(key.clone()) { continue; }
+            match tyref {
+                wasmparser::TypeRef::Func(ti) => { unresolved_funcs.push((mod_name.clone(), field.clone(), *ti)); }
+                wasmparser::TypeRef::Memory(mt) => { unresolved_mems.push((mod_name.clone(), field.clone(), *mt)); }
+                wasmparser::TypeRef::Global(gt) => { unresolved_globals.push((mod_name.clone(), field.clone(), *gt)); }
+                wasmparser::TypeRef::Table(tt) => { unresolved_tables.push((mod_name.clone(), field.clone(), *tt)); }
+                _ => {}
+            }
+        }
+    }
+
+    let unresolved_func_count = unresolved_funcs.len() as u32;
+    let unresolved_mem_count = unresolved_mems.len() as u32;
+    let unresolved_global_count = unresolved_globals.len() as u32;
+    let unresolved_table_count = unresolved_tables.len() as u32;
+
+    // Build lookup: (mod, field) → new import index
+    let mut unresolved_func_map: HashMap<(String, String), u32> = HashMap::new();
+    for (i, (m, f, _)) in unresolved_funcs.iter().enumerate() {
+        unresolved_func_map.insert((m.clone(), f.clone()), i as u32);
+    }
+    let mut unresolved_mem_map: HashMap<(String, String), u32> = HashMap::new();
+    for (i, (m, f, _)) in unresolved_mems.iter().enumerate() {
+        unresolved_mem_map.insert((m.clone(), f.clone()), i as u32);
+    }
+    let mut unresolved_global_map: HashMap<(String, String), u32> = HashMap::new();
+    for (i, (m, f, _)) in unresolved_globals.iter().enumerate() {
+        unresolved_global_map.insert((m.clone(), f.clone()), i as u32);
+    }
+    let mut unresolved_table_map: HashMap<(String, String), u32> = HashMap::new();
+    for (i, (m, f, _)) in unresolved_tables.iter().enumerate() {
+        unresolved_table_map.insert((m.clone(), f.clone()), i as u32);
+    }
+
+    // Offsets: imports first, then defined items
     let mut offsets: Vec<Offsets> = Vec::new();
-    let (mut t, mut f, mut m, mut tb, mut g) = (0u32, 0u32, 0u32, 0u32, 0u32);
+    let (mut t, mut f, mut m, mut tb, mut g) = (
+        0u32,
+        unresolved_func_count,
+        unresolved_mem_count,
+        unresolved_table_count,
+        unresolved_global_count,
+    );
 
     for &mi in &module_order {
         offsets.push(Offsets {
@@ -238,6 +302,8 @@ pub fn merge(component: &Component) -> Result<Vec<u8>, String> {
                         let target_off = &offsets[*tp];
                         r.func_map
                             .insert(imp_f, target_off.func_base + (ti - target.imported_func_count));
+                    } else if let Some(&new_idx) = unresolved_func_map.get(&key) {
+                        r.func_map.insert(imp_f, new_idx);
                     }
                     imp_f += 1;
                 }
@@ -247,6 +313,8 @@ pub fn merge(component: &Component) -> Result<Vec<u8>, String> {
                         let target_off = &offsets[*tp];
                         r.mem_map
                             .insert(imp_m, target_off.mem_base + (ti - target.imported_mem_count));
+                    } else if let Some(&new_idx) = unresolved_mem_map.get(&key) {
+                        r.mem_map.insert(imp_m, new_idx);
                     }
                     imp_m += 1;
                 }
@@ -256,6 +324,8 @@ pub fn merge(component: &Component) -> Result<Vec<u8>, String> {
                         let target_off = &offsets[*tp];
                         r.global_map
                             .insert(imp_g, target_off.global_base + (ti - target.imported_global_count));
+                    } else if let Some(&new_idx) = unresolved_global_map.get(&key) {
+                        r.global_map.insert(imp_g, new_idx);
                     }
                     imp_g += 1;
                 }
@@ -265,6 +335,8 @@ pub fn merge(component: &Component) -> Result<Vec<u8>, String> {
                         let target_off = &offsets[*tp];
                         r.table_map
                             .insert(imp_t, target_off.table_base + (ti - target.imported_table_count));
+                    } else if let Some(&new_idx) = unresolved_table_map.get(&key) {
+                        r.table_map.insert(imp_t, new_idx);
                     }
                     imp_t += 1;
                 }
@@ -357,8 +429,18 @@ pub fn merge(component: &Component) -> Result<Vec<u8>, String> {
     }
 
     // Exports: remap indices through each module's remapper
+    let mut seen_exports: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (pos, &mi) in module_order.iter().enumerate() {
         let remap = &mut remappers[pos];
+        let label = module_label.get(&mi).cloned().unwrap_or(format!("m{mi}"));
+
+        // If --exports-from is set, only export from matching module.
+        // Match against: module_label, CLI position ("0", "1", ...), or module index.
+        if let Some(from) = exports_from {
+            let pos_str = format!("{pos}");
+            let mi_str = format!("{mi}");
+            if label != from && pos_str != from && mi_str != from { continue; }
+        }
         for (name, kind, idx) in &infos[mi].exports {
             let new_idx = match kind {
                 wasmparser::ExternalKind::Func => remap.function_index(*idx),
@@ -374,13 +456,61 @@ pub fn merge(component: &Component) -> Result<Vec<u8>, String> {
                 wasmparser::ExternalKind::Global => ExportKind::Global,
                 _ => continue,
             };
-            export_sec.export(name, ek, new_idx);
+            // Deduplicate: prefix with label on collision
+            let export_name = if seen_exports.contains(name) {
+                format!("{label}_{name}")
+            } else {
+                name.clone()
+            };
+            seen_exports.insert(export_name.clone());
+            export_sec.export(&export_name, ek, new_idx);
         }
     }
 
     // Assemble
     let mut output = Module::new();
     output.section(&type_sec);
+
+    // Emit unresolved imports
+    if unresolved_func_count + unresolved_mem_count + unresolved_global_count + unresolved_table_count > 0 {
+        let mut imp_sec = ImportSection::new();
+        for (mod_name, field, orig_type_idx) in &unresolved_funcs {
+            // Find the first module that has this import and remap its type index
+            let mut new_ti = *orig_type_idx;
+            for (pos, &mi) in module_order.iter().enumerate() {
+                for (mn, fn_, tr) in &infos[mi].imports {
+                    if mn == mod_name && fn_ == field {
+                        if let wasmparser::TypeRef::Func(ti) = tr {
+                            new_ti = remappers[pos].type_index(*ti);
+                        }
+                        break;
+                    }
+                }
+            }
+            imp_sec.import(mod_name, field, wasm_encoder::EntityType::Function(new_ti));
+        }
+        for (mod_name, field, mt) in &unresolved_mems {
+            imp_sec.import(mod_name, field, wasm_encoder::EntityType::Memory(MemoryType {
+                minimum: mt.initial, maximum: mt.maximum, memory64: mt.memory64,
+                shared: mt.shared, page_size_log2: mt.page_size_log2,
+            }));
+        }
+        for (mod_name, field, gt) in &unresolved_globals {
+            imp_sec.import(mod_name, field, wasm_encoder::EntityType::Global(GlobalType {
+                val_type: reencode::RoundtripReencoder.val_type(gt.content_type).unwrap(),
+                mutable: gt.mutable, shared: gt.shared,
+            }));
+        }
+        for (mod_name, field, tt) in &unresolved_tables {
+            imp_sec.import(mod_name, field, wasm_encoder::EntityType::Table(TableType {
+                element_type: wasm_encoder::RefType::FUNCREF,
+                table64: tt.table64, minimum: tt.initial as u64,
+                maximum: tt.maximum.map(|m| m as u64), shared: false,
+            }));
+        }
+        output.section(&imp_sec);
+    }
+
     output.section(&func_sec);
     if tb > 0 {
         output.section(&table_sec);

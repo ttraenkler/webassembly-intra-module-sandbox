@@ -1,0 +1,11 @@
+(module
+  (import "lib" "malloc__inst0" (func $malloc (param i32) (result i32)))
+  (import "lib" "memcpy__inst0" (func $memcpy (param i32 i32 i32) (result i32)))
+  (memory (export "a_memory") 1)
+  (data (i32.const 0) "\01\02\03\04")
+  (func (export "run_a") (param $size i32) (result i32)
+    (local $buf i32)
+    (local.set $buf (call $malloc (local.get $size)))
+    (drop (call $memcpy (local.get $buf) (i32.const 0) (i32.const 4)))
+    (local.get $buf))
+)

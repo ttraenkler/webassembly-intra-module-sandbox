@@ -3,8 +3,10 @@ use std::fs;
 use std::io::Write;
 use std::process;
 
+mod dispatch;
 mod extract;
 mod merge;
+mod specialize;
 
 fn usage() -> ! {
     eprintln!("wasm-merge — shared-nothing multi-memory module merger");
@@ -82,22 +84,41 @@ fn main() {
 }
 
 /// Merge standalone .wasm modules: `wasm-merge b.wasm=b a.wasm=a -o out.wasm`
-fn run_merge_mode(args: &[String], out_index: Option<usize>) -> Vec<u8> {
-    // Collect file=label pairs (skip -o and its argument)
-    let mut inputs: Vec<(String, String)> = Vec::new(); // (file, label)
+fn run_merge_mode(args: &[String], _out_index: Option<usize>) -> Vec<u8> {
+    // Collect file=label pairs and flags
+    let mut inputs: Vec<(String, String)> = Vec::new();
+    let mut exports_from: Option<String> = None;
+    let mut do_specialize = false;
+    let mut do_dispatch = false;
+    let mut lib_label: Option<String> = None;
 
-    for (i, arg) in args.iter().enumerate() {
-        if arg == "-o" {
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "-o" { i += 2; continue; }
+        if arg == "--exports-from" {
+            i += 1;
+            exports_from = Some(args[i].clone());
+            i += 1;
             continue;
         }
-        if let Some(oi) = out_index {
-            if i == oi + 1 {
-                continue;
-            }
-        }
-        if arg.starts_with('-') {
+        if arg == "--specialize" {
+            do_specialize = true;
+            i += 1;
             continue;
         }
+        if arg == "--dispatch" {
+            do_dispatch = true;
+            i += 1;
+            continue;
+        }
+        if arg == "--lib" {
+            i += 1;
+            lib_label = Some(args[i].clone());
+            i += 1;
+            continue;
+        }
+        if arg.starts_with('-') { i += 1; continue; }
 
         if let Some((file, label)) = arg.split_once('=') {
             inputs.push((file.to_string(), label.to_string()));
@@ -105,6 +126,7 @@ fn run_merge_mode(args: &[String], out_index: Option<usize>) -> Vec<u8> {
             eprintln!("Error: expected <file.wasm>=<label>, got: {arg}");
             process::exit(1);
         }
+        i += 1;
     }
 
     if inputs.is_empty() {
@@ -194,10 +216,47 @@ fn run_merge_mode(args: &[String], out_index: Option<usize>) -> Vec<u8> {
 
     let component = extract::Component { modules, instances };
 
-    merge::merge(&component).unwrap_or_else(|e| {
-        eprintln!("Merge error: {e}");
-        process::exit(1);
-    })
+    if do_specialize || do_dispatch {
+        let mode_name = if do_specialize { "specialize" } else { "dispatch" };
+        let lib_label = lib_label.unwrap_or_else(|| {
+            eprintln!("Error: --{mode_name} requires --lib <label>");
+            process::exit(1);
+        });
+        let lib_idx = label_to_idx.get(&lib_label).copied().unwrap_or_else(|| {
+            eprintln!("Error: --lib {lib_label} not found in inputs");
+            process::exit(1);
+        });
+        let consumer_indices: Vec<usize> = (0..inputs.len()).filter(|&i| i != lib_idx).collect();
+
+        eprintln!("{mode_name}: lib={lib_label} (module {lib_idx}), {} consumers", consumer_indices.len());
+
+        if do_specialize {
+            specialize::specialize_merge(
+                &component,
+                lib_idx,
+                &consumer_indices,
+                exports_from.as_deref().and_then(|s| s.parse::<usize>().ok()),
+            ).unwrap_or_else(|e| {
+                eprintln!("Specialize error: {e}");
+                process::exit(1);
+            })
+        } else {
+            dispatch::dispatch_merge(
+                &component,
+                lib_idx,
+                &consumer_indices,
+                exports_from.as_deref().and_then(|s| s.parse::<usize>().ok()),
+            ).unwrap_or_else(|e| {
+                eprintln!("Dispatch error: {e}");
+                process::exit(1);
+            })
+        }
+    } else {
+        merge::merge(&component, exports_from.as_deref()).unwrap_or_else(|e| {
+            eprintln!("Merge error: {e}");
+            process::exit(1);
+        })
+    }
 }
 
 /// Merge from a binary component: `wasm-merge --component component.wasm -o out.wasm`
@@ -251,7 +310,7 @@ fn run_component_mode(args: &[String], out_index: Option<usize>) -> Vec<u8> {
         );
     }
 
-    let merged = merge::merge(&component).unwrap_or_else(|e| {
+    let merged = merge::merge(&component, None).unwrap_or_else(|e| {
         eprintln!("Merge error: {e}");
         process::exit(1);
     });
