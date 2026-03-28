@@ -2,6 +2,5 @@ wasm-merge/target/
 output/
 *.wasm
 *.wat
-!input/
-!input/*.wat
-!input/*.wasm
+!input/**/*.wat
+!input/**/*.wasm

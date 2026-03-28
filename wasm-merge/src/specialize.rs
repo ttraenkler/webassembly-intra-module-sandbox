@@ -136,7 +136,7 @@ pub fn specialize_merge(
     lib_idx: usize,
     consumer_indices: &[usize],
     _exports_from: Option<usize>,
-) -> Result<Vec<u8>, String> {
+) -> Result<(Vec<u8>, crate::verify::MergeManifest), String> {
     let lib_wasm = &component.modules[lib_idx].wasm;
     let analysis = analyze_lib(lib_wasm)?;
     let mutable_set: HashSet<u32> = analysis.mutable_globals.iter().copied().collect();
@@ -475,8 +475,9 @@ pub fn specialize_merge(
         }
     }
 
-    // Consumer function bodies — with import resolution
+    // Consumer function bodies — with import resolution and memory remapping
     for (ci_ord, &ci) in consumer_indices.iter().enumerate() {
+        let mut mem_remap = MemRemapper { mem_offset: ci_ord as u32 };
         let consumer_wasm = &component.modules[ci].wasm;
 
         // Build import remap: consumer's imported func idx → merged func idx
@@ -544,7 +545,7 @@ pub fn specialize_merge(
                             }
                         }
                         _ => {
-                            f.instruction(&reencode::RoundtripReencoder.instruction(op).map_err(|e| format!("{e}"))?);
+                            f.instruction(&mem_remap.instruction(op).map_err(|e| format!("{e}"))?);
                         }
                     }
                 }
@@ -687,7 +688,66 @@ pub fn specialize_merge(
         module.section(&d);
     }
 
-    Ok(module.finish())
+    // ── Build isolation manifest ─────────���──────────────────────────────
+    let mut func_allowed: Vec<Option<HashSet<u32>>> = Vec::new();
+
+    // Library original defined functions:
+    // - Pure (no memory access): None
+    // - State-touching: dead code (replaced by specialized copies), allow all memories
+    let all_mems: HashSet<u32> = (0..n).collect();
+    for (i, _) in orig_bodies.iter().enumerate() {
+        let fi = analysis.num_imported_functions + i as u32;
+        if analysis.state_touching.contains(&fi) {
+            func_allowed.push(Some(all_mems.clone())); // dead code, allow any
+        } else {
+            func_allowed.push(None);
+        }
+    }
+
+    // Specialized copies: each allowed its consumer's memory
+    for (ci_pos, needed) in per_consumer_needed.iter().enumerate() {
+        for &fi in &specialized_list {
+            if !needed.contains(&fi) { continue; }
+            let mut set = HashSet::new();
+            set.insert(ci_pos as u32);
+            func_allowed.push(Some(set));
+        }
+    }
+
+    // Shell wrappers: no direct memory access
+    for _ in &st_exports { for _ in 0..n { func_allowed.push(None); } }
+
+    // Consumer defined functions: each allowed its own memory
+    for (ci_ord, &ci) in consumer_indices.iter().enumerate() {
+        let parser = Parser::new(0);
+        for payload in parser.parse_all(&component.modules[ci].wasm) {
+            if let Ok(Payload::CodeSectionEntry(_)) = payload {
+                let mut set = HashSet::new();
+                set.insert(ci_ord as u32);
+                func_allowed.push(Some(set));
+            }
+        }
+    }
+
+    let manifest = crate::verify::MergeManifest {
+        num_imported_functions: fshift + analysis.num_imported_functions,
+        func_allowed_memories: func_allowed,
+    };
+
+    Ok((module.finish(), manifest))
+}
+
+// ── Memory-remapping reencoder for consumer code ────────────────────��─
+
+struct MemRemapper {
+    mem_offset: u32, // add this to every memory index
+}
+
+impl Reencode for MemRemapper {
+    type Error = std::convert::Infallible;
+    fn memory_index(&mut self, memory: u32) -> u32 {
+        memory + self.mem_offset
+    }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────

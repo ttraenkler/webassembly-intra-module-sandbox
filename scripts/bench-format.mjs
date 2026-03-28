@@ -1,5 +1,5 @@
-// bench-table.mjs — generate markdown tables from output/bench.json
-// Usage: node bench-table.mjs > docs/BENCHMARK.md
+// bench-format.mjs — generate markdown tables from output/bench.json
+// Usage: node scripts/bench-format.mjs > docs/BENCHMARK.md
 
 import { readFileSync } from 'fs';
 
@@ -20,7 +20,7 @@ console.log(`- **Workload**: ${cfg.measured_calls.toLocaleString()} ${cfg.worklo
 console.log(`- **Library**: ${cfg.wasi_lib}`);
 console.log(`- **Runtimes**: ${cfg.runtimes.join(', ')}`);
 console.log(`- **Runs**: ${cfg.runs_per_measurement} per measurement (first dropped as cold, median of rest)`);
-console.log(`- **Reproducible**: \`scripts/bench.sh && node scripts/bench-table.mjs > docs/BENCHMARK.md\``);
+console.log(`- **Reproducible**: \`scripts/benchmark-shared-library.sh && node scripts/bench-format.mjs > docs/BENCHMARK.md\``);
 console.log('');
 
 // Size table

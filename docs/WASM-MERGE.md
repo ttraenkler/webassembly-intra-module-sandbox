@@ -160,7 +160,7 @@ cd wasm-merge && cargo build --release
 ## Benchmarks
 
 ```bash
-scripts/bench.sh && node scripts/bench-table.mjs
+scripts/benchmark-shared-library.sh && node scripts/bench-format.mjs
 ```
 
 Generates `output/bench.json` and `docs/BENCHMARK.md` with size and performance

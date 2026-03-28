@@ -7,6 +7,7 @@ mod dispatch;
 mod extract;
 mod merge;
 mod specialize;
+mod verify;
 
 fn usage() -> ! {
     eprintln!("wasm-merge — shared-nothing multi-memory module merger");
@@ -90,6 +91,7 @@ fn run_merge_mode(args: &[String], _out_index: Option<usize>) -> Vec<u8> {
     let mut exports_from: Option<String> = None;
     let mut do_specialize = false;
     let mut do_dispatch = false;
+    let mut do_verify = false;
     let mut lib_label: Option<String> = None;
 
     let mut i = 0;
@@ -109,6 +111,11 @@ fn run_merge_mode(args: &[String], _out_index: Option<usize>) -> Vec<u8> {
         }
         if arg == "--dispatch" {
             do_dispatch = true;
+            i += 1;
+            continue;
+        }
+        if arg == "--verify" {
+            do_verify = true;
             i += 1;
             continue;
         }
@@ -230,7 +237,7 @@ fn run_merge_mode(args: &[String], _out_index: Option<usize>) -> Vec<u8> {
 
         eprintln!("{mode_name}: lib={lib_label} (module {lib_idx}), {} consumers", consumer_indices.len());
 
-        if do_specialize {
+        let (merged, manifest) = if do_specialize {
             specialize::specialize_merge(
                 &component,
                 lib_idx,
@@ -250,7 +257,22 @@ fn run_merge_mode(args: &[String], _out_index: Option<usize>) -> Vec<u8> {
                 eprintln!("Dispatch error: {e}");
                 process::exit(1);
             })
+        };
+
+        if do_verify {
+            let violations = verify::verify_isolation(&merged, &manifest);
+            if violations.is_empty() {
+                eprintln!("  ✓ isolation verified ({} functions checked)", manifest.func_allowed_memories.len());
+            } else {
+                eprintln!("  ✗ {} isolation violation(s):", violations.len());
+                for v in &violations {
+                    eprintln!("    {v}");
+                }
+                process::exit(1);
+            }
         }
+
+        merged
     } else {
         merge::merge(&component, exports_from.as_deref()).unwrap_or_else(|e| {
             eprintln!("Merge error: {e}");

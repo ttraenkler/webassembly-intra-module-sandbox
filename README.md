@@ -21,15 +21,16 @@ wasm-merge a.wasm=inst0 b.wasm=inst1 lib.wasm=lib --dispatch --lib lib -o merged
 - [WASM-MERGE.md](docs/WASM-MERGE.md) — tool usage, modes, how specialization works
 - [SHARED-LIBRARY.md](docs/SHARED-LIBRARY.md) — problem statement and solution for multiply-instantiated shared libraries
 - [BENCHMARK.md](docs/BENCHMARK.md) — binary size and runtime performance (V8, Cranelift), N=2 to N=100
-- [SECURITY.md](docs/SECURITY.md) — security comparison: insecure vs bounds-checked vs table indirection
+- [ACCESSOR.md](docs/ACCESSOR.md) — shared memory accessor patterns: security (insecure/bounded/handle) and ownership (borrow/move)
 - [DYNAMIC_MEMORY_INDEX.md](docs/DYNAMIC_MEMORY_INDEX.md) — motivation for `i32.load_dynamic` spec proposal
 
 ## Files
 
 | Directory | Contents |
 |-----------|----------|
-| `input/` | Source `.wat` modules and `wasi-libc.wasm` |
-| `scripts/` | `run.sh`, `run_security.sh`, `bench.sh`, `bench-table.mjs` |
+| `input/accessor/` | All WAT examples: merge demo, security patterns, ownership patterns, component model |
+| `input/shared-lib/` | Shared library demo (`libc_subset.wat`, `wasi-libc.wasm`) |
+| `scripts/` | `demo-sandbox-merge.sh`, `demo-shared-memory-accessor.sh`, `benchmark-shared-library.sh`, `bench-format.mjs` |
 | `wasm-merge/` | Multi-memory merger (Rust) |
 | `docs/` | Documentation |
 | `output/` | Generated artifacts (gitignored) |
@@ -47,8 +48,8 @@ cd wasm-merge && cargo build --release
 ## Run
 
 ```bash
-scripts/run.sh                  # basic merge demo
-scripts/run_security.sh         # generates docs/SECURITY.md
-scripts/bench.sh                # full benchmarks → output/bench.json
-node scripts/bench-table.mjs > docs/BENCHMARK.md
+scripts/demo-sandbox-merge.sh              # basic merge demo
+scripts/demo-shared-memory-accessor.sh     # generates docs/ACCESSOR.md
+scripts/benchmark-shared-library.sh        # full benchmarks → output/bench.json
+node scripts/bench-format.mjs > docs/BENCHMARK.md
 ```

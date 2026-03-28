@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 
 export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
 
-# bench.sh — build all variants, run benchmarks on V8 and Wasmtime,
+# benchmark-shared-library.sh — build all variants, run benchmarks on V8 and Wasmtime,
 # write results to output/bench.json
 #
 # Prerequisites: wasm-tools, wasm-opt, wasmtime, node
@@ -16,7 +16,7 @@ MERGE="cargo run --manifest-path wasm-merge/Cargo.toml --release --quiet --"
 OUT=output
 mkdir -p "$OUT"
 
-WASI_LIB=input/wasi-libc.wasm
+WASI_LIB=input/shared-lib/wasi-libc.wasm
 if [ ! -f "$WASI_LIB" ]; then
   echo "Missing $WASI_LIB — compile with wasi-sdk first"
   exit 1
@@ -287,4 +287,4 @@ echo '}' >> "$OUT/bench.json"
 echo ""
 echo "=== Done ==="
 echo "Results: $OUT/bench.json"
-echo "Tables:  node bench-table.mjs"
+echo "Tables:  node scripts/bench-format.mjs > docs/BENCHMARK.md"

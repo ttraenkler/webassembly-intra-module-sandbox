@@ -20,7 +20,7 @@ pub fn dispatch_merge(
     lib_idx: usize,
     consumer_indices: &[usize],
     _exports_from: Option<usize>,
-) -> Result<Vec<u8>, String> {
+) -> Result<(Vec<u8>, crate::verify::MergeManifest), String> {
     let lib_wasm = &component.modules[lib_idx].wasm;
     let analysis = analyze_lib(lib_wasm)?;
     let mutable_set: HashSet<u32> = analysis.mutable_globals.iter().copied().collect();
@@ -371,8 +371,9 @@ pub fn dispatch_merge(
         }
     }
 
-    // Consumer function bodies with import resolution
+    // Consumer function bodies with import resolution and memory remapping
     for (ci_ord, &ci) in consumer_indices.iter().enumerate() {
+        let mut mem_remap = MemRemapper { mem_offset: ci_ord as u32 };
         let consumer_wasm = &component.modules[ci].wasm;
         let mut consumer_import_remap: HashMap<u32, u32> = HashMap::new();
         let mut consumer_imp_func_count = 0u32;
@@ -422,7 +423,7 @@ pub fn dispatch_merge(
                                 f.instruction(&I::Call(function_index));
                             }
                         }
-                        _ => { f.instruction(&reencode::RoundtripReencoder.instruction(op).map_err(|e| format!("{e}"))?); }
+                        _ => { f.instruction(&mem_remap.instruction(op).map_err(|e| format!("{e}"))?); }
                     }
                 }
                 code.function(&f);
@@ -554,7 +555,53 @@ pub fn dispatch_merge(
         module.section(&d);
     }
 
-    Ok(module.finish())
+    // ── Build isolation manifest ────────────────────────────────────────
+    let mut func_allowed: Vec<Option<HashSet<u32>>> = Vec::new();
+
+    // Library defined functions: state-touching use dispatch wrappers (no direct mem),
+    // pure have no memory ops
+    for _ in &orig_bodies { func_allowed.push(None); }
+
+    // Dispatch wrappers: access all N memories by design
+    let all_mems: HashSet<u32> = (0..n).collect();
+    for _ in &need_mem_ops { func_allowed.push(Some(all_mems.clone())); }
+    for _ in &need_gg { func_allowed.push(None); }
+    for _ in &need_gs { func_allowed.push(None); }
+
+    // Shell wrappers: no direct memory access
+    for _ in &st_exports { for _ in 0..n { func_allowed.push(None); } }
+
+    // Consumer defined functions: each allowed its own memory
+    for (ci_ord, &ci) in consumer_indices.iter().enumerate() {
+        let parser = Parser::new(0);
+        for payload in parser.parse_all(&component.modules[ci].wasm) {
+            if let Ok(Payload::CodeSectionEntry(_)) = payload {
+                let mut set = HashSet::new();
+                set.insert(ci_ord as u32);
+                func_allowed.push(Some(set));
+            }
+        }
+    }
+
+    let manifest = crate::verify::MergeManifest {
+        num_imported_functions: fshift + analysis.num_imported_functions,
+        func_allowed_memories: func_allowed,
+    };
+
+    Ok((module.finish(), manifest))
+}
+
+// ── Memory-remapping reencoder for consumer code ──────────────────────
+
+struct MemRemapper {
+    mem_offset: u32,
+}
+
+impl Reencode for MemRemapper {
+    type Error = std::convert::Infallible;
+    fn memory_index(&mut self, memory: u32) -> u32 {
+        memory + self.mem_offset
+    }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────

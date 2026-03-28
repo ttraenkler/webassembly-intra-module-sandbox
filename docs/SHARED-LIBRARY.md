@@ -21,7 +21,7 @@ Tested with **real wasi-libc** (62KB, 199 functions, dlmalloc) — malloc, callo
 
 Benchmarked with real wasi-libc, N=2 to N=100 consumers, on V8 and Cranelift. Inlined mode is **faster than baseline** on both runtimes after `wasm-opt -O4`. Shared mode trades performance for up to **98% binary size reduction**.
 
-Full results: [BENCHMARK.md](BENCHMARK.md) — reproducible via `scripts/bench.sh && node scripts/bench-table.mjs > docs/BENCHMARK.md`
+Full results: [BENCHMARK.md](BENCHMARK.md) — reproducible via `scripts/benchmark-shared-library.sh && node scripts/bench-format.mjs > docs/BENCHMARK.md`
 
 **Note**: separate instantiation (each consumer gets its own library instance via the runtime) is faster — zero dispatch overhead, just a cross-module call trampoline. This approach trades that for **single-module deployment** — useful when shipping one flat `.wasm` file to runtimes without native Component Model support.
 

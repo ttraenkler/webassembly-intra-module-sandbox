@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
 
 WASM_MERGE="cargo run --manifest-path wasm-merge/Cargo.toml --release --quiet --"
-IN=input
+IN=input/accessor
 OUT=output
 mkdir -p "$OUT"
 
@@ -18,19 +18,19 @@ echo "$SEP"
 echo "  STEP 0 — Source WAT modules"
 echo "$SEP"
 echo ""
-echo "── a.wat (Module A — owns memory, exports accessor) ──"
-cat "$IN/a.wat"
+echo "── insecure/a.wat (Module A — owns memory, exports accessor) ──"
+cat "$IN/insecure/a.wat"
 echo ""
-echo "── b.wat (Module B — imports accessor, never touches raw memory) ──"
-cat "$IN/b.wat"
+echo "── insecure/b.wat (Module B — imports accessor, never touches raw memory) ──"
+cat "$IN/insecure/b.wat"
 echo ""
 
 # ── Step 1: Compile ──────��───────────────────────────────────────────
 echo "$SEP"
 echo "  STEP 1 — Compile WAT → Wasm (wasm-tools parse)"
 echo "$SEP"
-wasm-tools parse "$IN/a.wat" -o "$OUT/a.wasm"
-wasm-tools parse "$IN/b.wat" -o "$OUT/b.wasm"
+wasm-tools parse "$IN/insecure/a.wat" -o "$OUT/a.wasm"
+wasm-tools parse "$IN/insecure/b.wat" -o "$OUT/b.wasm"
 echo "  ✓ a.wasm  ($(wc -c < "$OUT/a.wasm") bytes)"
 echo "  ✓ b.wasm  ($(wc -c < "$OUT/b.wasm") bytes)"
 echo ""
