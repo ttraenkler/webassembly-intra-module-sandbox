@@ -146,52 +146,96 @@ void* malloc(int size) {
 }
 ```
 
-After merge, `malloc` is rewritten to select the correct memory per consumer:
+Compiled to Wasm, the memory index is a static immediate — baked into the bytecode:
 
-```c
-// merged — conceptual C equivalent
-static char inst0_heap[...];   // memory 0 — app_a's heap
-static char inst1_heap[...];   // memory 1 — app_b's heap
-static int  inst0_heap_end;    // app_a's allocator state
-static int  inst1_heap_end;    // app_b's allocator state
+```wat
+(module
+  (memory (export "memory") 1)
+  (global $heap_end (mut i32) (i32.const 0))
 
-// One shared malloc — selects memory at runtime via instance index
-void* shared_malloc(int size, int instance) {
-    char* heap     = (instance == 0) ? inst0_heap     : inst1_heap;
-    int*  heap_end = (instance == 0) ? &inst0_heap_end : &inst1_heap_end;
-    int old = *heap_end;
-    *heap_end += align_up(size, 8);       // align_up shared as-is (pure)
-    return &heap[old];
-}
+  (func (export "malloc") (param $size i32) (result i32)
+    (local $old i32)
+    (local.set $old (global.get $heap_end))
+    (global.set $heap_end
+      (i32.add (global.get $heap_end)
+               (call $align_up (local.get $size) (i32.const 8))))
+    (local.get $old))
 
-// Shell wrappers — hardwire the instance index
-void* alloc_a(int size) { return shared_malloc(size, 0); }
-void* alloc_b(int size) { return shared_malloc(size, 1); }
+  (func $align_up (param $n i32) (param $a i32) (result i32)
+    (i32.and
+      (i32.add (local.get $n) (i32.sub (local.get $a) (i32.const 1)))
+      (i32.sub (i32.const 0) (local.get $a))))
+)
 ```
 
-A main function calling both:
+One memory, one global. A second instance needs a second module — there is no way for this function body to reference a different memory or global at runtime.
+
+After merge, the module has two memories and two globals (one per consumer). `malloc` is rewritten with an `$instance` parameter and `br_table` dispatch to select the correct memory and global. Shell wrappers hardwire the instance index:
+
+```wat
+(module
+  (memory (;0;) 1)                       ;; app_a's heap
+  (memory (;1;) 1)                       ;; app_b's heap
+  (global (;0;) (mut i32) i32.const 0)   ;; inst0_heap_end
+  (global (;1;) (mut i32) i32.const 0)   ;; inst1_heap_end
+
+  ;; Shared malloc — one copy, dispatches on $instance at runtime
+  (func $malloc (param $size i32) (param $instance i32) (result i32)
+    (local $old i32)
+    ;; old = heap_end[$instance]  (via br_table)
+    (block $done
+      (block $b1 (block $b0
+        (br_table $b0 $b1 (local.get $instance)))
+        (local.set $old (global.get 0)) (br $done))             ;; instance 0
+      (local.set $old (global.get 1)))                          ;; instance 1
+    ;; heap_end[$instance] += align_up(size, 8)
+    (block $done2
+      (block $b1 (block $b0
+        (br_table $b0 $b1 (local.get $instance)))
+        (global.set 0 (i32.add (global.get 0)
+          (call $align_up (local.get $size) (i32.const 8))))
+        (br $done2))
+      (global.set 1 (i32.add (global.get 1)
+        (call $align_up (local.get $size) (i32.const 8)))))
+    (local.get $old))
+
+  ;; align_up — pure function, shared as-is (no dispatch needed)
+  (func $align_up (param $n i32) (param $a i32) (result i32)
+    (i32.and
+      (i32.add (local.get $n) (i32.sub (local.get $a) (i32.const 1)))
+      (i32.sub (i32.const 0) (local.get $a))))
+
+  ;; Shell wrappers — hardwire the instance index
+  (func $alloc_a (export "alloc_a") (param $size i32) (result i32)
+    (call $malloc (local.get $size) (i32.const 0)))
+  (func $alloc_b (export "alloc_b") (param $size i32) (result i32)
+    (call $malloc (local.get $size) (i32.const 1)))
+)
+```
+
+A main function calling both allocators:
 
 ```c
 void _start() {
-    void* a = alloc_a(64);   // → shared_malloc(64, 0) → inst0_heap
-    void* b = alloc_b(64);   // → shared_malloc(64, 1) → inst1_heap
+    void* a = alloc_a(64);   // → malloc(64, 0)
+    void* b = alloc_b(64);   // → malloc(64, 1)
 }
 ```
 
-After `wasm-opt -O4`, the instance index is constant-propagated, the switch is eliminated, and the calls are inlined:
+After `wasm-opt -O4`, the constant `$instance` is propagated through `malloc`, the `br_table` is eliminated, and the shell wrappers are inlined:
 
-```c
-// optimized — conceptual C equivalent
-void _start() {
-    int old_a = inst0_heap_end;
-    inst0_heap_end += 64;                // malloc inlined, memory 0 baked in
-    void* a = &inst0_heap[old_a];
-
-    int old_b = inst1_heap_end;
-    inst1_heap_end += 64;                // malloc inlined, memory 1 baked in
-    void* b = &inst1_heap[old_b];
-}
+```wat
+(func $_start (export "_start")
+  (local $old_a i32) (local $old_b i32)
+  ;; alloc_a(64) → malloc(64, 0) → branch 0 folded
+  (local.set $old_a (global.get 0))
+  (global.set 0 (i32.add (global.get 0) (i32.const 64)))
+  ;; alloc_b(64) → malloc(64, 1) → branch 1 folded
+  (local.set $old_b (global.get 1))
+  (global.set 1 (i32.add (global.get 1) (i32.const 64))))
 ```
+
+No call, no `br_table`, no instance parameter. Each allocation is a direct global read + update against the correct per-consumer heap pointer.
 
 App A and B are fully isolated — each has its own memory and allocator state — but share one copy of `align_up` and run in a single module with no cross-module call overhead.
 
